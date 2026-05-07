@@ -6,7 +6,7 @@ This module mirrors the structure of starfish/dexterity/tasks/spot_base.py
 but adapted for judo's standalone simulation framework.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Generic, TypeVar
 
@@ -33,7 +33,6 @@ from judo.tasks.spot.spot_constants import (
     LEG_SOFT_UPPER_JOINT_LIMITS,
     LEGS_STANDING_POS,
     LEGS_STANDING_POS_RL,
-    SPOT_LOCOMOTION_POLICY_PATH,
     STANDING_HEIGHT,
     STANDING_HEIGHT_CMD,
     TORSO_CMD_INDS,
@@ -42,15 +41,6 @@ from judo.tasks.spot.spot_constants import (
 )
 
 XML_PATH = str(MODEL_PATH / "xml" / "spot_primitive" / "robot.xml")
-
-
-@dataclass
-class GoalPositions:
-    """Goal positions for Spot tasks."""
-
-    origin: np.ndarray = field(default_factory=lambda: np.array([0, 0, 0.0]))
-    blue_cross: np.ndarray = field(default_factory=lambda: np.array([2.77, 0.71, 0.3]))
-    black_cross: np.ndarray = field(default_factory=lambda: np.array([1.5, -1.5, 0.275]))
 
 
 @dataclass
@@ -118,9 +108,9 @@ class SpotBase(Task[ConfigT], Generic[ConfigT]):
         return 2
 
     @property
-    def locomotion_policy_path(self) -> str:
-        """Path to Spot locomotion policy."""
-        return str(SPOT_LOCOMOTION_POLICY_PATH)
+    def uses_locomotion_policy(self) -> bool:  # type: ignore[override]
+        """Spot tasks always use a locomotion policy backend."""
+        return True
 
     def __init__(
         self,
@@ -454,7 +444,7 @@ class SpotBase(Task[ConfigT], Generic[ConfigT]):
     def get_action_components(self) -> list[str]:
         """Get names of each component in the action command vector.
 
-        Matches starfish/dexterity/tasks/spot_base.py.
+        Matches judo/tasks/spot/spot_base.py.
         """
         action_components = ["spot/base.vx", "spot/base.vy", "spot/base.vtheta"]
         if self.use_arm:

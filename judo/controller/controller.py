@@ -3,7 +3,7 @@
 import copy
 import warnings
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal
+from typing import Any, Callable, Literal
 
 import numpy as np
 from mujoco import MjData
@@ -15,7 +15,9 @@ from judo.app.utils import register_optimizers_from_cfg, register_tasks_from_cfg
 from judo.config import OverridableConfig
 from judo.gui import slider
 from judo.optimizers import Optimizer, OptimizerConfig, get_registered_optimizers
-from judo.tasks import Task, TaskConfig, get_registered_tasks
+from judo.tasks import Task, TaskConfig, get_registered_tasks, get_task_registration
+from judo.tasks.spot.spot_constants import POLICY_OUTPUT_DIM
+from judo.utils.hierarchical_mj_rollout_backend import HierarchicalMJRolloutBackend
 from judo.utils.mj_rollout_backend import MJRolloutBackend
 from judo.utils.normalization import (
     IdentityNormalizer,
@@ -24,13 +26,17 @@ from judo.utils.normalization import (
     make_normalizer,
     normalizer_registry,
 )
-from judo.utils.policy_mj_rollout_backend import PolicyMJRolloutBackend
-
-if TYPE_CHECKING:
-    from judo.utils.mjwarp_rollout_backend import MJWarpRolloutBackend
-from judo.utils.rollout_backend import RolloutBackend
+from judo.utils.rollout_backend import BatchedRolloutBackend, RolloutBackend
 from judo.utils.timer import Timer
 from judo.visualizers.utils import get_trace_sensors
+
+RolloutBackendEntry = type[RolloutBackend] | Callable[..., RolloutBackend]
+
+
+DEFAULT_ROLLOUT_BACKEND_REGISTRY: dict[str, RolloutBackendEntry] = {
+    "mujoco": MJRolloutBackend,
+    "mujoco_hierarchical": HierarchicalMJRolloutBackend,
+}
 
 
 @slider("horizon", 0.1, 10.0, bounded=True)
@@ -55,7 +61,9 @@ class Controller:
         controller_config: ControllerConfig,
         task: Task,
         optimizer: Optimizer,
-        rollout_backend: "Literal['mujoco'] | MJWarpRolloutBackend" = "mujoco",
+        rollout_backend: str = "mujoco",
+        rollout_backend_registry: dict[str, RolloutBackendEntry] | None = None,
+        rollout_backend_kwargs: dict[str, Any] | None = None,
     ) -> None:
         """Initialize the controller.
 
@@ -63,37 +71,36 @@ class Controller:
             controller_config: The controller configuration.
             task: The task to use.
             optimizer: The optimizer to use.
-            rollout_backend: The backend to use for rollouts. Either "mujoco" to create
-                a new CPU backend, or an existing RolloutBackend instance (e.g. GPU warp).
+            rollout_backend: Name of the backend to use for rollouts (e.g., "mujoco", "mujoco_hierarchical").
+            rollout_backend_registry: Optional mapping of backend names to backend classes.
+                Overrides entries in DEFAULT_ROLLOUT_BACKEND_REGISTRY.
+            rollout_backend_kwargs: Optional extra kwargs for rollout backend constructor.
+                For "mujoco_hierarchical" backend, 'physics_substeps' and 'policy_path' cannot be
+                specified here—they are sourced from the task and task registry respectively.
+                Raises ValueError if either is provided. To use different values, create or
+                update a task registry entry.
         """
         self._controller_cfg = controller_config
         self.task = task
         self.optimizer = optimizer
+        self._rollout_backend_registry = dict(DEFAULT_ROLLOUT_BACKEND_REGISTRY)
+        self._rollout_backend_registry.update(rollout_backend_registry or {})
+        self._rollout_backend_kwargs = rollout_backend_kwargs or {}
 
         self.available_optimizers = get_registered_optimizers()
         self.available_tasks = get_registered_tasks()
 
         self.model = self.task.model
 
-        # Initialize rollout backend (auto-select policy backend if task requires it)
-        if not isinstance(rollout_backend, str):
-            # MJWarpRolloutBackend instance (avoid isinstance check to skip mujoco_warp import)
-            self.rollout_backend = rollout_backend
-        elif self.task.uses_locomotion_policy:
-            assert self.task.locomotion_policy_path is not None
-            self.rollout_backend: RolloutBackend = PolicyMJRolloutBackend(
-                model=self.model,
-                num_threads=self.optimizer_cfg.num_rollouts,
-                policy_path=self.task.locomotion_policy_path,
-                physics_substeps=self.task.physics_substeps,
-            )
-        else:
-            self.rollout_backend = MJRolloutBackend(
-                model=self.model,
-                num_threads=self.optimizer_cfg.num_rollouts,
-            )
-
-        self._last_policy_output = None
+        self.rollout_backend: RolloutBackend = self._make_rollout_backend(
+            rollout_backend,
+            backend_kwargs=self._rollout_backend_kwargs,
+        )
+        self._last_policy_output = (
+            np.zeros((self.optimizer_cfg.num_rollouts, POLICY_OUTPUT_DIM))
+            if isinstance(self.rollout_backend, HierarchicalMJRolloutBackend)
+            else None
+        )
         self.action_normalizer = self._init_action_normalizer()
 
         # a container for any metadata from the system that we want to pass to the task
@@ -371,9 +378,9 @@ class Controller:
         self.candidate_knots = np.tile(self.nominal_knots, (self.optimizer_cfg.num_rollouts, 1, 1))
         self.times = self.task.data.time + self.spline_timesteps
         self.update_spline(self.times, self.nominal_knots)
-        # Reset policy output state for locomotion policy tasks
-        if self.task.uses_locomotion_policy:
-            self._last_policy_output = None
+        # Reset policy output state for policy rollout backends
+        if isinstance(self.rollout_backend, HierarchicalMJRolloutBackend):
+            self._last_policy_output = np.zeros((self.optimizer_cfg.num_rollouts, POLICY_OUTPUT_DIM))
 
     def update_traces(self) -> None:
         """Update traces by extracting data from sensors readings.
@@ -431,11 +438,67 @@ class Controller:
             action_normalizer_kwargs["max"] = self.task.actuator_ctrlrange[:, 1]
         elif self.action_normalizer_type == "running":
             action_normalizer_kwargs["init_std"] = 1.0  # TODO(yunhai): make this configurable
-        return make_normalizer(self.action_normalizer_type, self.model.nu, **action_normalizer_kwargs)
+        return make_normalizer(self.action_normalizer_type, self.task.nu, **action_normalizer_kwargs)
+
+    def _make_rollout_backend(
+        self,
+        backend_name: str,
+        backend_kwargs: dict[str, Any] | None = None,
+    ) -> RolloutBackend:
+        """Instantiate a rollout backend from the merged backend registry."""
+        backend_factory = self._rollout_backend_registry.get(backend_name)
+        if backend_factory is None:
+            raise ValueError(
+                f"Unknown rollout backend '{backend_name}'. "
+                "Provide it via rollout_backend_registry or choose a built-in backend."
+            )
+
+        final_kwargs = {
+            "model": self.model,
+            "num_threads": self.optimizer_cfg.num_rollouts,
+        }
+        final_kwargs.update(backend_kwargs or {})
+
+        if backend_name == "mujoco_hierarchical":
+            # For the built-in hierarchical backend, physics_substeps is task-owned
+            # and should not be overridden at controller construction time.
+            if "physics_substeps" in final_kwargs:
+                raise ValueError(
+                    f"Cannot specify 'physics_substeps' in rollout_backend_kwargs. "
+                    f"It is determined by the task configuration (task.physics_substeps). "
+                    f"Current task '{self.task.name}' has physics_substeps={self.task.physics_substeps}."
+                )
+            final_kwargs["physics_substeps"] = self.task.physics_substeps
+
+            # policy_path is currently registry-owned for hierarchical backend wiring.
+            # This keeps policy/model assumptions centralized until hierarchical ONNX
+            # integration is generalized on the C++ side.
+            if "policy_path" in final_kwargs:
+                raise ValueError(
+                    f"Cannot specify 'policy_path' in rollout_backend_kwargs. "
+                    f"It must be defined in the task registry entry for '{self.task.name}'. "
+                    f"To use a different policy path, create or update a task registry entry with the desired path."
+                )
+
+            task_policy_path = get_task_registration(self.task.name).locomotion_policy_path
+            if task_policy_path is None:
+                raise ValueError(
+                    f"Backend '{backend_name}' requires 'policy_path'. "
+                    f"Task '{self.task.name}' must have a locomotion_policy_path registered in the task registry."
+                )
+            final_kwargs["policy_path"] = task_policy_path
+
+        backend = backend_factory(**final_kwargs)
+        if not isinstance(backend, RolloutBackend):
+            raise TypeError(
+                f"Rollout backend factory for '{backend_name}' must return a RolloutBackend, "
+                f"got {type(backend).__name__}."
+            )
+        return backend
 
 
 class BatchedControllers:
-    """Coordinates multiple controllers sharing a single RolloutBackend.
+    """Coordinates multiple controllers sharing a single BatchedRolloutBackend.
 
     This class manages batched rollouts across multiple controllers, executing
     a single GPU rollout for all controllers at each optimization iteration.
@@ -444,7 +507,7 @@ class BatchedControllers:
         # Create shared backend with num_threads per problem and num_problems
         num_rollouts = 64  # rollouts per controller
         num_problems = 3   # number of controllers
-        backend = RolloutBackend(model, num_threads=num_rollouts, num_problems=num_problems)
+        backend = BatchedRolloutBackend(model, num_threads=num_rollouts, num_problems=num_problems)
 
         # Create batched controller coordinator
         batched = BatchedControllers(config, task, optimizer, backend)
@@ -458,7 +521,7 @@ class BatchedControllers:
         controller_config: ControllerConfig,
         task: Task,
         optimizer: Optimizer,
-        rollout_backend: "MJWarpRolloutBackend",
+        rollout_backend: BatchedRolloutBackend,
     ) -> None:
         """Initialize the batched controllers.
 
@@ -466,7 +529,7 @@ class BatchedControllers:
             controller_config: Configuration for all controllers.
             task: Template task instance (new instances created from its class and model_path).
             optimizer: Template optimizer instance (deep copied for each controller).
-            rollout_backend: The shared WarpRolloutBackend instance. Should be initialized with
+            rollout_backend: Shared batched rollout backend instance. Should be initialized with
                 num_problems equal to len(controllers).
         """
         self.num_problems = rollout_backend.num_problems
@@ -474,11 +537,19 @@ class BatchedControllers:
         for _ in range(self.num_problems):
             new_task = task.__class__(model_path=task.model_path)
             new_task.config = copy.deepcopy(task.config)
+
+            # Construct controllers through normal backend-name resolution, but route
+            # the shared backend instance via a per-controller registry override.
+            shared_backend_name = "__shared_batched_backend__"
+            shared_backend_registry: dict[str, RolloutBackendEntry] = {
+                shared_backend_name: (lambda **_: rollout_backend)
+            }
             controller = Controller(
                 controller_config=controller_config,
                 task=new_task,
                 optimizer=copy.deepcopy(optimizer),
-                rollout_backend=rollout_backend,
+                rollout_backend=shared_backend_name,
+                rollout_backend_registry=shared_backend_registry,
             )
             self.controllers.append(controller)
         self.rollout_backend = rollout_backend
@@ -492,9 +563,9 @@ class BatchedControllers:
                 )
 
         # Validate num_problems matches number of controllers
-        if rollout_backend.num_problems != len(self.controllers):
+        if self.num_problems != len(self.controllers):
             raise ValueError(
-                f"RolloutBackend num_problems ({rollout_backend.num_problems}) does not match "
+                f"RolloutBackend num_problems ({self.num_problems}) does not match "
                 f"number of controllers ({len(self.controllers)}). "
                 f"Initialize backend with num_problems={len(self.controllers)}."
             )
@@ -593,8 +664,9 @@ class BatchedControllers:
         self.timer_rewards.print_stats()
         self.timer_update_iter.print_stats()
         self.timer_post_opt.print_stats()
-        if hasattr(self.rollout_backend, "print_timer_stats"):
-            self.rollout_backend.print_timer_stats()
+        backend_print_timer_stats = getattr(self.rollout_backend, "print_timer_stats", None)
+        if callable(backend_print_timer_stats):
+            backend_print_timer_stats()
 
     def reset_timers(self) -> None:
         """Reset all timers."""
@@ -603,8 +675,9 @@ class BatchedControllers:
         self.timer_rewards.reset()
         self.timer_update_iter.reset()
         self.timer_post_opt.reset()
-        if hasattr(self.rollout_backend, "reset_timers"):
-            self.rollout_backend.reset_timers()
+        backend_reset_timers = getattr(self.rollout_backend, "reset_timers", None)
+        if callable(backend_reset_timers):
+            backend_reset_timers()
 
     def update_states(self, state_msgs: list) -> None:
         """Update states for all controllers.
@@ -630,7 +703,7 @@ class BatchedControllers:
         else:
             pa_np = np.stack([pa for pa in previous_actions_list if pa is not None], axis=0)
             pa_broadcast = np.repeat(pa_np, self.rollout_backend.num_threads, axis=0)
-            import warp as wp  # noqa: PLC0415
+            import warp as wp  # pyright: ignore[reportMissingImports]  # noqa: PLC0415
 
             self._last_policy_output = wp.array(pa_broadcast, dtype=wp.float32, device=self.rollout_backend.device)
 
@@ -662,17 +735,24 @@ def make_controller(
     init_optimizer: str,
     task_registration_cfg: DictConfig | None = None,
     optimizer_registration_cfg: DictConfig | None = None,
-    rollout_backend: "Literal['mujoco'] | MJWarpRolloutBackend" = "mujoco",
+    controller_cls: type[Controller] | None = None,
+    **controller_kwargs: Any,
 ) -> Controller:
     """Make a controller.
 
     Args:
         init_task: The task name to use.
         init_optimizer: The optimizer name to use.
-        task_registration_cfg: Optional task registration config.
-        optimizer_registration_cfg: Optional optimizer registration config.
-        rollout_backend: Either a backend type string ("mujoco") to create a new backend,
-            or an existing WarpRolloutBackend instance to share with other controllers.
+        task_registration_cfg: Optional task registration overrides keyed by task name.
+            Each entry must contain `task` and `config` import paths, and may also define
+            `rollout_backend`, `simulation_backend`, and `locomotion_policy_path`.
+            See register_tasks_from_cfg for the exact supported schema.
+        optimizer_registration_cfg: Optional optimizer registration overrides keyed by
+            optimizer name. Each entry must contain `optimizer` and `config` import paths.
+            See register_optimizers_from_cfg for the exact supported schema.
+        controller_cls: Optional controller class to instantiate instead of Controller.
+        **controller_kwargs: Additional keyword arguments forwarded to the controller
+            constructor.
 
     Returns:
         The created Controller instance.
@@ -689,10 +769,10 @@ def make_controller(
 
     assert task_entry is not None, f"Task {init_task} not found in task registry."
     assert optimizer_entry is not None, f"Optimizer {init_optimizer} not found in optimizer registry."
+    task_registration = get_task_registration(init_task)
 
     # instantiate the task/optimizer/controller
-    task_cls, _ = task_entry
-    task = task_cls()
+    task = task_entry.task_type()
 
     optimizer_cls, optimizer_config_cls = optimizer_entry
     optimizer_cfg = optimizer_config_cls()
@@ -702,9 +782,11 @@ def make_controller(
     controller_cfg = ControllerConfig()
     controller_cfg.set_override(init_task)
 
-    return Controller(
+    cls = controller_cls or Controller
+    return cls(
         controller_config=controller_cfg,
         task=task,
         optimizer=optimizer,
-        rollout_backend=rollout_backend,
+        rollout_backend=task_registration.rollout_backend,
+        **controller_kwargs,
     )

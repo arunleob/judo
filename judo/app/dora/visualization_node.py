@@ -8,7 +8,8 @@ from dora_utils.node import DoraNode, on_event
 from omegaconf import DictConfig
 from viser import GuiFolderHandle, GuiImageHandle, GuiInputHandle, IcosphereHandle, MeshHandle
 
-from judo.app.structs import MujocoState
+from judo.app.structs import RenderPose
+from judo.tasks import TaskRegistration
 from judo.visualizers.visualizer import Visualizer
 
 ElementType = GuiImageHandle | GuiInputHandle | GuiFolderHandle | MeshHandle | IcosphereHandle
@@ -29,8 +30,24 @@ class VisualizationNode(DoraNode):
         optimizer_override_cfg: DictConfig | None = None,
         sim_pause_button: bool = True,
         geom_exclude_substring: str = "collision",
+        available_tasks: dict[str, TaskRegistration] | None = None,
     ) -> None:
-        """Initialize the visualization node."""
+        """Initialize the visualization node (Viser web GUI for task/optimizer control).
+
+        Args:
+            node_id: Identifier for this dora node.
+            max_workers: Maximum number of worker threads for dora (None = auto).
+            init_task: Name of the task to initialize.
+            init_optimizer: Name of the optimizer to initialize (e.g., "cem", "ps").
+            task_registration_cfg: Optional config for task registration overrides.
+            optimizer_registration_cfg: Optional config for optimizer registration overrides.
+            controller_override_cfg: Optional config overrides for the controller.
+            optimizer_override_cfg: Optional config overrides for the optimizer.
+            sim_pause_button: Whether to display a simulation pause button in the GUI.
+            geom_exclude_substring: Geometry name substring to exclude from visualization (default "collision" hides collision shapes).
+            available_tasks: Optional pre-computed mapping of task names to TaskRegistration entries
+                for the task selector. If None, tasks are inferred from the task registry.
+        """
         super().__init__(node_id=node_id, max_workers=max_workers)
         self.visualizer = Visualizer(
             init_task=init_task,
@@ -41,6 +58,7 @@ class VisualizationNode(DoraNode):
             optimizer_override_cfg=optimizer_override_cfg,
             sim_pause_button=sim_pause_button,
             geom_exclude_substring=geom_exclude_substring,
+            available_tasks=available_tasks,
         )
 
     def write_sim_pause(self) -> None:
@@ -85,7 +103,7 @@ class VisualizationNode(DoraNode):
             self.node.send_output("task_config", *to_arrow(self.visualizer.task_config))
         self.visualizer.task_config_updated.clear()
 
-    @on_event("INPUT", "states")
+    @on_event("INPUT", "render_pose")
     def update_states(self, event: dict) -> None:
         """Callback to update states on receiving a new state measurement."""
         if self.visualizer.controller_config.spline_order == "cubic" and self.visualizer.optimizer_config.num_nodes < 4:
@@ -96,11 +114,11 @@ class VisualizationNode(DoraNode):
                     break
             self.visualizer.optimizer_config_updated.set()
 
-        state_msg = from_arrow(event["value"], event["metadata"], MujocoState)
+        render_pose_msg = from_arrow(event["value"], event["metadata"], RenderPose)
         try:
             with self.visualizer.task_lock:
-                self.visualizer.data.xpos[:] = state_msg.xpos
-                self.visualizer.data.xquat[:] = state_msg.xquat
+                self.visualizer.data.xpos[:] = render_pose_msg.xpos
+                self.visualizer.data.xquat[:] = render_pose_msg.xquat
                 self.visualizer.viser_model.set_data(self.visualizer.data)
         except ValueError:
             # we're switching tasks and the new task has a different number of xpos/xquat

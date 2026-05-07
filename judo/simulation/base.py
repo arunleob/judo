@@ -5,6 +5,7 @@ from abc import ABC, abstractmethod
 import numpy as np
 from omegaconf import DictConfig
 
+from judo.app.structs import MujocoState, RenderPose
 from judo.app.utils import register_tasks_from_cfg
 from judo.tasks import get_registered_tasks
 from judo.tasks.base import Task
@@ -37,8 +38,7 @@ class Simulation(ABC):
         if task_entry is None:
             raise ValueError(f"Task {task_name} not found in task registry")
 
-        task_cls, _ = task_entry
-        self.task: Task = task_cls()
+        self.task: Task = task_entry.task_type()
         self.task.reset()
 
     @abstractmethod
@@ -54,6 +54,26 @@ class Simulation(ABC):
         self.paused = not self.paused
 
     @property
-    @abstractmethod
+    def sim_state(self) -> MujocoState:
+        """Returns the current simulation state."""
+        return MujocoState(
+            time=self.task.data.time,  # type: ignore
+            qpos=self.task.data.qpos,  # type: ignore
+            qvel=self.task.data.qvel,  # type: ignore
+            mocap_pos=self.task.data.mocap_pos,  # type: ignore
+            mocap_quat=self.task.data.mocap_quat,  # type: ignore
+            sim_metadata=self.task.get_sim_metadata(),
+        )
+
+    @property
+    def render_pose(self) -> RenderPose:
+        """Returns the current pose data used for visualization."""
+        return RenderPose(
+            xpos=self.task.data.xpos,  # type: ignore
+            xquat=self.task.data.xquat,  # type: ignore
+        )
+
+    @property
     def timestep(self) -> float:
         """Timestep the simulation expects to run at."""
+        return self.task.dt

@@ -2,6 +2,7 @@
 
 import time
 from threading import Lock
+from typing import Callable
 
 import pyarrow as pa
 from dora_utils.dataclasses import from_event, to_arrow
@@ -23,37 +24,59 @@ class ControllerNode(DoraNode):
         max_workers: int | None = None,
         task_registration_cfg: DictConfig | None = None,
         optimizer_registration_cfg: DictConfig | None = None,
+        make_controller_fn: Callable | None = None,
     ) -> None:
-        """Initialize the controller node."""
+        """Initialize the controller node.
+
+        Args:
+            init_task: Name of the task to initialize.
+            init_optimizer: Name of the optimizer to initialize (e.g., "cem", "ps", "mppi").
+            node_id: Identifier for this dora node.
+            max_workers: Maximum number of worker threads for dora (None = auto).
+            task_registration_cfg: Optional config for task registration overrides.
+            optimizer_registration_cfg: Optional config for optimizer registration overrides.
+            make_controller_fn: Optional factory function to create Controller instances.
+                Defaults to judo.controller.make_controller. Allows custom controller creation.
+        """
         super().__init__(node_id=node_id, max_workers=max_workers)
-        self.controller = make_controller(
-            init_task=init_task,
-            init_optimizer=init_optimizer,
-            task_registration_cfg=task_registration_cfg,
-            optimizer_registration_cfg=optimizer_registration_cfg,
-        )
+        self._make_controller_fn = make_controller_fn or make_controller
+        self._task_registration_cfg = task_registration_cfg
+        self._optimizer_registration_cfg = optimizer_registration_cfg
+        self.controller = self._build_controller(init_task, init_optimizer)
         self._paused = False
         self.write_controls()
         self.lock = Lock()
+
+    def _build_controller(self, task_name: str, optimizer_name: str) -> Controller:
+        """Build controller using the task's registered rollout backend."""
+        return self._make_controller_fn(
+            init_task=task_name,
+            init_optimizer=optimizer_name,
+            task_registration_cfg=self._task_registration_cfg,
+            optimizer_registration_cfg=self._optimizer_registration_cfg,
+        )
+
+    def _current_optimizer_name(self) -> str:
+        """Look up the name of the current optimizer from the registry.
+
+        Returns "cem" as a safe default if no registry entry matches the active optimizer instance.
+        """
+        for name, (cls, _) in self.controller.available_optimizers.items():
+            if isinstance(self.controller.optimizer, cls):
+                return name
+        return "cem"
 
     @on_event("INPUT", "task")
     def update_task(self, event: dict) -> None:
         """Updates the task type."""
         new_task = event["value"].to_numpy(zero_copy_only=False)[0]
         task_entry = self.controller.available_tasks.get(new_task)
-        if task_entry is not None:
-            task_cls, _ = task_entry
-            with self.lock:
-                task = task_cls()
-                optimizer = self.controller.optimizer_cls(self.controller.optimizer_config_cls(), task.nu)
-                self.controller = Controller(
-                    controller_config=self.controller.controller_cfg,
-                    task=task,
-                    optimizer=optimizer,
-                )
-                self.write_controls()
-        else:
+        if task_entry is None:
             raise ValueError(f"Task {new_task} not found in task registry.")
+
+        with self.lock:
+            self.controller = self._build_controller(new_task, self._current_optimizer_name())
+            self.write_controls()
 
     @on_event("INPUT", "task_reset")
     def reset_task(self, event: dict) -> None:
@@ -75,6 +98,7 @@ class ControllerNode(DoraNode):
         if optimizer_entry is not None:
             optimizer_cls, optimizer_config_cls = optimizer_entry
             optimizer_config = optimizer_config_cls()
+            optimizer_config.set_override(self.controller.task.name)
             optimizer = optimizer_cls(optimizer_config, self.controller.task.nu)
             with self.lock:
                 self.controller.optimizer = optimizer
