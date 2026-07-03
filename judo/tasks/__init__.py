@@ -7,6 +7,7 @@ from judo.tasks.base import Task, TaskConfig
 from judo.tasks.caltech_leap_cube import CaltechLeapCube, CaltechLeapCubeConfig
 from judo.tasks.cartpole import Cartpole, CartpoleConfig
 from judo.tasks.cylinder_push import CylinderPush, CylinderPushConfig
+from judo.tasks.dubins_push import DubinsPush, DubinsPushConfig
 from judo.tasks.fr3_pick import FR3Pick, FR3PickConfig
 from judo.tasks.leap_cube import LeapCube, LeapCubeConfig
 from judo.tasks.leap_cube_down import LeapCubeDown, LeapCubeDownConfig
@@ -38,6 +39,7 @@ class TaskRegistration:
 
 _registered_tasks: Dict[str, TaskRegistration] = {
     CylinderPush.name: TaskRegistration(CylinderPush, CylinderPushConfig),
+    DubinsPush.name: TaskRegistration(DubinsPush, DubinsPushConfig),
     Cartpole.name: TaskRegistration(Cartpole, CartpoleConfig),
     FR3Pick.name: TaskRegistration(FR3Pick, FR3PickConfig),
     LeapCube.name: TaskRegistration(LeapCube, LeapCubeConfig),
@@ -125,6 +127,8 @@ __all__ = [
     "CartpoleConfig",
     "CylinderPush",
     "CylinderPushConfig",
+    "DubinsPush",
+    "DubinsPushConfig",
     "FR3Pick",
     "FR3PickConfig",
     "LeapCube",

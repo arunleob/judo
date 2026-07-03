@@ -1,0 +1,55 @@
+<mujoco model="dubins_push">
+  <option timestep="0.02" />
+
+  <asset>
+    <texture name="blue_grid" type="2d" builtin="checker" rgb1=".02 .14 .44" rgb2=".27 .55 1" width="300" height="300" mark="edge" markrgb="1 1 1"/>
+    <material name="blue_grid" texture="blue_grid" texrepeat="1 1" texuniform="true" reflectance=".2"/>
+  </asset>
+
+  <default>
+    <default class="position_act">
+      <position kp="10" ctrlrange="-10 10" forcerange="-1000 1000"/>
+    </default>
+  </default>
+
+  <worldbody>
+    <body>
+      <geom mass="0" name="floor" pos="0 0 -0.25" condim="3" size="10.0 10.0 0.10" rgba="0 1 1 1" type="box" material="blue_grid"/>
+    </body>
+
+    <body name="pusher" pos="0 0 0">
+      <joint name="pusher_y" damping="4" type="slide" axis="0 1 0" />
+      <inertial pos="0 0 0" mass="0.001" diaginertia="1e-6 1e-6 1e-6"/>
+      <body name="pusher_steer" pos="0 0 0">
+        <joint name="pusher_theta" damping="1" type="hinge" axis="0 0 1" />
+        <inertial pos="0 0 0" mass="0.001" diaginertia="1e-6 1e-6 1e-6"/>
+        <body name="pusher_forward" pos="0 0 0">
+          <joint name="pusher_x" damping="4" type="slide" axis="1 0 0" />
+          <!-- friction must be > 0; zero friction causes NaN in mujoco_warp contact solver -->
+          <geom name="pusher" type="cylinder" size="0.25 0.1" mass="1" rgba=".9 .5 .5 1" friction="0.01"/>
+          <site pos="0 0 0.15" name="pusher_site"/>
+        </body>
+      </body>
+    </body>
+
+    <body name="cart" pos="0 0 0">
+      <joint name="slider_cart_x" damping="4" type="slide" axis="1 0 0" />
+      <joint name="slider_cart_y" damping="4" type="slide" axis="0 1 0" />
+      <!-- friction must be > 0; zero friction causes NaN in mujoco_warp contact solver -->
+      <geom name="cart" type="cylinder" size="0.25 0.1" mass="1" rgba=".1 .5 .5 1" friction="0.01"/>
+      <site pos="0 0 0.15" name="cart_site"/>
+    </body>
+  </worldbody>
+
+  <actuator>
+    <position name="actuator_forward_position" joint="pusher_x" class="position_act" />
+    <position name="actuator_heading" joint="pusher_theta" class="position_act" />
+  </actuator>
+
+  <sensor>
+    <framepos name="trace_pusher" objtype="site" objname="pusher_site"/>
+    <framelinvel name="pusher_linvel" objtype="site" objname="pusher_site"/>
+    <framepos name="trace_cart" objtype="site" objname="cart_site"/>
+  </sensor>
+
+</mujoco>
