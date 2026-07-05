@@ -15,6 +15,9 @@
         "w_pusher_heading": 0.1,
         "pusher_goal_offset": 0.25,
         "pointing_gate_distance": 0.1,
+        "pusher_goal_gate_distance": 0.3,
+        "w_pusher_proximity_pushing": 0.0,
+        "w_cart_position_pushing": 0.1,
         "goal_pos": [0.0, 0.0]
     },
     "optimizer": "cem",
