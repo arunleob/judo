@@ -16,6 +16,23 @@ def set_default_cylinder_push_overrides() -> None:
     )
 
 
+def set_default_diff_drive_push_overrides() -> None:
+    """Sets the default task-specific controller config overrides for the diff drive push task.
+
+    Mirrors run_mpc/configs/diff_drive_push.json so the interactive app matches the tuned config.
+    The longer horizon (vs the 1.0 s default) lets the planner see the arc-around-the-cart
+    maneuver, which is what prevents the pusher from lining up behind the cart and stalling.
+    """
+    set_config_overrides(
+        "diff_drive_push",
+        ControllerConfig,
+        {
+            "horizon": 1.5,
+            "spline_order": "zero",
+        },
+    )
+
+
 def set_default_cartpole_overrides() -> None:
     """Sets the default task-specific controller config overrides for the cartpole task."""
     set_config_overrides(

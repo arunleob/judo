@@ -1,6 +1,6 @@
 {
     "controller_config": {
-        "horizon": 1.0,
+        "horizon": 1.5,
         "control_freq": 20.0,
         "spline_order": "zero",
         "max_opt_iters": 1,
@@ -23,8 +23,8 @@
         "num_nodes": 4,
         "use_noise_ramp": true,
         "noise_ramp": 2.5,
-        "sigma_min": 0.1,
-        "sigma_max": 1.0,
+        "sigma_min": 0.05,
+        "sigma_max": 0.4,
         "num_elites": 2
     }
 }
