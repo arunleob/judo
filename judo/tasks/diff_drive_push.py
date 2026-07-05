@@ -12,19 +12,22 @@ from judo.tasks.base import Task, TaskConfig
 from judo.tasks.cost_functions import quadratic_norm
 from judo.utils.fields import np_1d_field
 
-XML_PATH = str(MODEL_PATH / "xml/dubins_push.xml")
+XML_PATH = str(MODEL_PATH / "xml/diff_drive_push.xml")
 GOAL_DISTANCE_THRESHOLD = 0.3
 
 
 @slider("w_pusher_proximity", 0.0, 5.0, 0.1)
+@slider("w_pusher_heading", 0.0, 5.0, 0.1)
 @dataclass
-class DubinsPushConfig(TaskConfig):
-    """Reward configuration for the Dubins push task."""
+class DiffDrivePushConfig(TaskConfig):
+    """Reward configuration for the differential-drive push task."""
 
     w_pusher_proximity: float = 0.5
     w_pusher_velocity: float = 0.0
     w_cart_position: float = 0.1
+    w_pusher_heading: float = 0.1
     pusher_goal_offset: float = 0.25
+    pointing_gate_distance: float = 0.1
     goal_pos: np.ndarray = np_1d_field(
         np.array([0.0, 0.0]),
         names=["x", "y"],
@@ -37,19 +40,23 @@ class DubinsPushConfig(TaskConfig):
     )
 
 
-class DubinsPush(Task[DubinsPushConfig]):
-    """Defines the Dubins push task with position-controlled pusher forward offset and heading."""
+class DiffDrivePush(Task[DiffDrivePushConfig]):
+    """Planar push task where the pusher has differential-drive dynamics.
 
-    name: str = "dubins_push"
-    config_t: type[DubinsPushConfig] = DubinsPushConfig
+    The pusher can turn in place and drive forward/backward along its heading, but cannot drift
+    sideways. It pushes a free planar cart toward a goal.
+    """
+
+    name: str = "diff_drive_push"
+    config_t: type[DiffDrivePushConfig] = DiffDrivePushConfig
 
     def __init__(self, model_path: str = XML_PATH, sim_model_path: str | None = None) -> None:
-        """Initializes the Dubins push task."""
+        """Initializes the differential-drive push task."""
         super().__init__(model_path=model_path, sim_model_path=sim_model_path)
         self.cart_pos_idx = self.get_joint_position_start_index("slider_cart_x")
-        self.cart_vel_idx = self.get_joint_velocity_start_index("slider_cart_x")
+        self.pusher_vel_idx = self.get_joint_velocity_start_index("pusher_x")
         self.pusher_pos_idx = self.get_sensor_start_index("trace_pusher")
-        self.pusher_vel_idx = self.get_sensor_start_index("pusher_linvel")
+        self.pusher_heading_idx = self.get_sensor_start_index("pusher_heading")
         self.reset()
 
     def reward(
@@ -59,22 +66,27 @@ class DubinsPush(Task[DubinsPushConfig]):
         controls: np.ndarray,
         system_metadata: dict[str, Any] | None = None,
     ) -> np.ndarray:
-        """Implements the Dubins push reward (same structure as cylinder_push).
+        """Implements the differential-drive push reward.
 
-        Maps a list of states, list of controls, to a batch of rewards (summed over time) for each rollout.
+        Maps a batch of states, sensors, and controls to a batch of rewards (summed over time).
 
-        The Dubins push reward has three terms:
-            * `pusher_reward`, penalizing the distance between the pusher and the cart.
-            * `velocity_reward` penalizing squared linear velocity of the pusher.
+        The reward has four terms:
+            * `pusher_reward`, penalizing the distance between the pusher and a target point offset
+              "behind" the cart along the cart-to-goal direction (the pusher goal).
+            * `velocity_reward`, penalizing the squared forward and angular velocity of the pusher.
             * `goal_reward`, penalizing the distance from the cart to the goal.
+            * `heading_reward`, rewarding the pusher for pointing toward the pusher goal. This term
+              is gated off when the pusher is very close to the pusher goal so the target pointing
+              direction does not change rapidly.
 
         Since we return rewards, each penalty term is returned as negative. The max reward is zero.
         """
         batch_size = states.shape[0]
 
         pusher_pos = sensors[..., self.pusher_pos_idx : self.pusher_pos_idx + 2]
+        pusher_heading = sensors[..., self.pusher_heading_idx : self.pusher_heading_idx + 2]
         cart_pos = states[..., self.cart_pos_idx : self.cart_pos_idx + 2]
-        pusher_vel = sensors[..., self.pusher_vel_idx : self.pusher_vel_idx + 2]
+        pusher_vel = states[..., self.pusher_vel_idx : self.pusher_vel_idx + 3]
         cart_goal = self.config.goal_pos[0:2]
 
         cart_to_goal = cart_goal - cart_pos
@@ -91,11 +103,20 @@ class DubinsPush(Task[DubinsPushConfig]):
         goal_proximity = quadratic_norm(cart_pos - cart_goal)
         goal_reward = -self.config.w_cart_position * goal_proximity.sum(-1)
 
+        pusher_to_goal = pusher_goal - pusher_pos
+        pusher_to_goal_dist = np.linalg.norm(pusher_to_goal, axis=-1, keepdims=True)
+        pusher_to_goal_direction = pusher_to_goal / np.clip(pusher_to_goal_dist, 1e-6, None)
+        alignment = (pusher_heading * pusher_to_goal_direction).sum(-1)
+        pointing_gate = (pusher_to_goal_dist[..., 0] > self.config.pointing_gate_distance).astype(alignment.dtype)
+        heading_penalty = pointing_gate * (1.0 - alignment)
+        heading_reward = -self.config.w_pusher_heading * heading_penalty.sum(-1)
+
         assert pusher_reward.shape == (batch_size,)
         assert velocity_reward.shape == (batch_size,)
         assert goal_reward.shape == (batch_size,)
+        assert heading_reward.shape == (batch_size,)
 
-        return pusher_reward + velocity_reward + goal_reward
+        return pusher_reward + velocity_reward + goal_reward + heading_reward
 
     def success(self, model: mujoco.MjModel, data: mujoco.MjData, metadata: dict[str, Any] | None = None) -> bool:
         """Check if the cart is close to the goal position."""
@@ -105,15 +126,17 @@ class DubinsPush(Task[DubinsPushConfig]):
 
     def reset(self) -> None:
         """Resets the model to a default (random) state."""
-        pusher_theta_idx = self.get_joint_position_start_index("pusher_theta")
         pusher_x_idx = self.get_joint_position_start_index("pusher_x")
+        pusher_y_idx = self.get_joint_position_start_index("pusher_y")
+        pusher_theta_idx = self.get_joint_position_start_index("pusher_theta")
 
         pusher_angle = 2 * np.pi * np.random.rand()
         cart_angle = 2 * np.pi * np.random.rand()
 
         self.data.qpos[:] = 0.0
-        self.data.qpos[pusher_theta_idx] = pusher_angle
-        self.data.qpos[pusher_x_idx] = 1.0
+        self.data.qpos[pusher_x_idx] = np.cos(pusher_angle)
+        self.data.qpos[pusher_y_idx] = np.sin(pusher_angle)
+        self.data.qpos[pusher_theta_idx] = 2 * np.pi * np.random.rand()
         self.data.qpos[self.cart_pos_idx] = 2 * np.cos(cart_angle)
         self.data.qpos[self.cart_pos_idx + 1] = 2 * np.sin(cart_angle)
         self.data.qvel[:] = 0.0

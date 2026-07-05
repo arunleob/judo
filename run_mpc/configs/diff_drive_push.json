@@ -7,12 +7,14 @@
         "max_num_traces": 5,
         "action_normalizer": "none"
     },
-    "task": "dubins_push",
+    "task": "diff_drive_push",
     "task_config": {
         "w_pusher_proximity": 0.5,
         "w_pusher_velocity": 0.0,
         "w_cart_position": 0.1,
+        "w_pusher_heading": 0.1,
         "pusher_goal_offset": 0.25,
+        "pointing_gate_distance": 0.1,
         "goal_pos": [0.0, 0.0]
     },
     "optimizer": "cem",
