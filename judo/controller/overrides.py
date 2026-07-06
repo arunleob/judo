@@ -22,6 +22,10 @@ def set_default_diff_drive_push_overrides() -> None:
     Mirrors run_mpc/configs/diff_drive_push.json so the interactive app matches the tuned config.
     The longer horizon (vs the 1.0 s default) lets the planner see the arc-around-the-cart
     maneuver, which is what prevents the pusher from lining up behind the cart and stalling.
+    `min_max` action normalization samples in a per-actuator normalized space, so the heading
+    actuator (ctrlrange +-10) gets exploration proportional to its range instead of ~5x less than
+    the forward actuator (+-2). This keeps the sampler turning and is the main lever for escaping the
+    collinear (pusher/cart/goal in a line) saddle.
     """
     set_config_overrides(
         "diff_drive_push",
@@ -29,6 +33,7 @@ def set_default_diff_drive_push_overrides() -> None:
         {
             "horizon": 1.5,
             "spline_order": "zero",
+            "action_normalizer": "min_max",
         },
     )
 

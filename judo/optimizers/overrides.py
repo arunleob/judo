@@ -42,11 +42,24 @@ def set_default_cylinder_push_overrides() -> None:
 def set_default_diff_drive_push_overrides() -> None:
     """Sets the default task-specific optimizer config overrides for the diff drive push task.
 
-    Mirrors run_mpc/configs/diff_drive_push.json for CEM (the default optimizer). More rollouts and
-    the noise ramp restore the exploration needed to break the collinear (pusher/cart/goal in a
-    line) saddle instead of stalling. PS and MPPI get the shared exploration fields so switching
-    optimizers in the GUI stays reasonable.
+    Mirrors run_mpc/configs/diff_drive_push.json. MPPI is the tuned optimizer for this task: its
+    fixed (non-collapsing) sampling sigma keeps probing turning maneuvers every iteration, which -
+    combined with min_max action normalization (set on ControllerConfig) - reliably breaks the
+    collinear (pusher/cart/goal in a line) saddle where CEM's sigma collapses to "straight forward"
+    and stalls. CEM/PS still get the shared exploration fields so switching optimizers in the GUI
+    stays reasonable.
     """
+    set_config_overrides(
+        "diff_drive_push",
+        MPPIConfig,
+        {
+            "num_nodes": 4,
+            "num_rollouts": 32,
+            "use_noise_ramp": True,
+            "sigma": 0.2,
+            "temperature": 0.05,
+        },
+    )
     set_config_overrides(
         "diff_drive_push",
         CrossEntropyMethodConfig,
@@ -59,9 +72,11 @@ def set_default_diff_drive_push_overrides() -> None:
             "sigma_max": 0.4,
         },
     )
-    _shared = {"num_nodes": 4, "num_rollouts": 32, "use_noise_ramp": True}
-    set_config_overrides("diff_drive_push", PredictiveSamplingConfig, _shared)
-    set_config_overrides("diff_drive_push", MPPIConfig, _shared)
+    set_config_overrides(
+        "diff_drive_push",
+        PredictiveSamplingConfig,
+        {"num_nodes": 4, "num_rollouts": 32, "use_noise_ramp": True},
+    )
 
 
 def set_default_cartpole_overrides() -> None:
