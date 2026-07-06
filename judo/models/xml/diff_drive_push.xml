@@ -16,9 +16,9 @@
       <joint name="pusher_y" damping="8" type="slide" axis="0 1 0" />
       <joint name="pusher_theta" damping="2" type="hinge" axis="0 0 1" />
       <!-- friction must be > 0; zero friction causes NaN in mujoco_warp contact solver -->
-      <geom name="pusher" type="cylinder" size="0.25 0.1" mass="1" rgba=".9 .5 .5 1" friction="0.01"/>
+      <geom name="pusher" type="cylinder" size="0.13 0.1" mass="1" rgba=".9 .5 .5 1" friction="0.01"/>
       <!-- heading marker so the facing direction is visible -->
-      <geom name="pusher_nose" type="box" pos="0.18 0 0" size="0.09 0.04 0.06" rgba=".95 .85 .2 1" mass="0" contype="0" conaffinity="0"/>
+      <geom name="pusher_nose" type="box" pos="0.13 0 0" size="0.09 0.04 0.06" rgba=".95 .85 .2 1" mass="0" contype="0" conaffinity="0"/>
       <site pos="0 0 0.15" name="pusher_site"/>
     </body>
 
